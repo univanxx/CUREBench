@@ -31,6 +31,11 @@ def main():
     dataset_name = getattr(args, 'dataset')
     model_name = getattr(args, 'model_path', None) or getattr(args, 'model_name', None)
     model_class = getattr(args, 'model_class', 'auto')
+
+    if model_class == 'gpt-oss':
+        prompt_path = getattr(args, 'gpt-oss-config_prompt_path', None)
+        system_prompt_key = getattr(args, 'gpt-oss-config_system_prompt_key', None)
+        device_map = getattr(args, 'gpt-oss-config_device_map', None)
     
     """Run evaluation with metadata support"""
     print("\n" + "="*60)
@@ -48,7 +53,7 @@ def main():
     kit = CompetitionKit(config_path=config_path)
     
     print(f"Loading model: {model_name}")
-    kit.load_model(model_name, model_class)
+    kit.load_model(model_name, model_class, prompt_path=prompt_path, system_prompt_key=system_prompt_key, device_map=device_map)
     
     # Show available datasets
     print("Available datasets:")

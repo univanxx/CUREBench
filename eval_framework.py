@@ -21,7 +21,6 @@ Usage:
 """
 
 import json
-import os
 import sys
 import logging
 import argparse
@@ -30,6 +29,21 @@ from dataclasses import dataclass
 from tqdm import tqdm
 from abc import ABC, abstractmethod
 import csv
+#### OpenAI ####
+from openai_harmony import (
+    HarmonyEncodingName,
+    load_harmony_encoding,
+    Conversation,
+    Message,
+    Role,
+    SystemContent,
+    DeveloperContent,
+    ReasoningEffort
+)
+import os
+os.environ["HF_HOME"] = "/media/ssd-3t/isviridov/mera/mera_multi_external/models_cache"
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -128,8 +142,9 @@ class LocalModel(BaseModel):
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 torch_dtype=torch.bfloat16,
-                device_map="auto",
-                quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+                device_map="cuda:0",
+                quantization_config = BitsAndBytesConfig(load_in_8bit=True),
+                cache_dir="/media/ssd-3t/isviridov/neurips_2025/models_data",
                 **kwargs
             )
             logger.info(f"Loaded local model: {self.model_name}")
@@ -167,6 +182,59 @@ class LocalModel(BaseModel):
         
         return response_text, complete_messages
 
+class GPTOssModel(BaseModel):
+    """Local HuggingFace model wrapper"""
+    
+    def load(self, **kwargs):
+        """Load GPT-oss model"""        
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, torch_dtype=torch.bfloat16, device_map=kwargs.get("device_map"))
+
+        with open(kwargs.get("prompt_path"), 'r') as f:
+            prompts = json.load(f)
+        self.system_prompt = prompts[kwargs.get("system_prompt_key")]
+
+        logger.info(f"Loaded GPT-oss model: {kwargs.get('model_name')}")
+    
+    def inference(self, prompt: str, max_tokens: int = 512, num_beams: int = 1, do_sample: bool = False) -> Tuple[str, List[Dict]]:
+        """GPT-oss model inference"""
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": prompt}
+        ]
+        print("messages:", messages)
+
+        encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+        # Build conversation
+        convo = Conversation.from_messages([
+            Message.from_role_and_content(Role.SYSTEM, SystemContent.new().with_reasoning_effort(ReasoningEffort.LOW)),
+            Message.from_role_and_content(
+                Role.DEVELOPER,
+                DeveloperContent.new().with_instructions(self.system_prompt)
+            ),
+            Message.from_role_and_content(Role.USER, prompt)
+        ])
+        # Render prompt
+        prefill_ids = encoding.render_conversation_for_completion(convo, Role.ASSISTANT)
+        prefill_tensor = torch.tensor([prefill_ids], device="cuda:0")
+        stop_token_ids = encoding.stop_tokens_for_assistant_actions()
+    
+        outputs = self.model.generate(
+            input_ids=prefill_tensor,
+            max_new_tokens=max_tokens,
+            num_beams=num_beams,
+            do_sample=do_sample,
+            eos_token_id=stop_token_ids
+        )
+        
+        completion_ids = outputs[0][len(prefill_ids):]
+        entries = encoding.parse_messages_from_completion_tokens(completion_ids, Role.ASSISTANT)
+        response_text = entries[-1].to_dict()["content"][0]["text"]
+        print("response_text:", response_text)
+        # Create complete conversation history
+        complete_messages = messages + [{"role": "assistant", "content": response_text}]
+        
+        return response_text, complete_messages
 
 class CustomModel(BaseModel):
     """Custom model wrapper for user-defined models"""
@@ -242,6 +310,7 @@ class CompetitionKit:
         if model_type == "auto":
             model_type = self._detect_model_type(model_name)
         
+        print(model_type)
         logger.info(f"Loading model: {model_name} (type: {model_type})")
         
         if model_type == "chatgpt":
@@ -255,10 +324,13 @@ class CompetitionKit:
             if not model_instance or not inference_func:
                 raise ValueError("Custom model requires 'model_instance' and 'inference_func' parameters")
             self.model = CustomModel(model_name, model_instance, inference_func)
+        elif model_type == "gpt-oss":
+            self.model = GPTOssModel(model_name)
         else:
             raise ValueError(f"Unknown model type: {model_type}")
         
         # Load the model
+        print(kwargs)
         self.model.load(**kwargs)
     
     def _load_dataset_configs(self, config) -> Dict:
